@@ -447,7 +447,7 @@ public class SwiftDeviceCalendarPlugin: NSObject, FlutterPlugin, EKEventViewDele
 
         let recurrenceRule = parseEKRecurrenceRules(ekEvent)
         let event = Event(
-            eventId: ekEvent.calendarItemIdentifier,
+            eventId: ekEvent.calendarItemExternalIdentifier,
             calendarId: calendarId,
             eventTitle: ekEvent.title ?? "New Event",
             eventDescription: ekEvent.notes,
@@ -906,7 +906,7 @@ public class SwiftDeviceCalendarPlugin: NSObject, FlutterPlugin, EKEventViewDele
 
             do {
                 try self.eventStore.save(ekEvent!, span: .futureEvents)
-                result(ekEvent!.calendarItemIdentifier)
+                result(ekEvent!.calendarItemExternalIdentifier)
             } catch {
                 self.eventStore.reset()
                 result(FlutterError(code: self.genericError, message: error.localizedDescription, details: nil))
@@ -974,7 +974,7 @@ public class SwiftDeviceCalendarPlugin: NSObject, FlutterPlugin, EKEventViewDele
                     return
                 }
 
-                let ekEvent = foundEkEvents!.first(where: {$0.calendarItemIdentifier == eventId})
+                let ekEvent = foundEkEvents!.first(where: {$0.calendarItemExternalIdentifier == eventId})
 
                 do {
                     if (!followingInstances!) {
