@@ -198,68 +198,105 @@ public class SwiftDeviceCalendarPlugin: NSObject, FlutterPlugin, EKEventViewDele
         result(hasPermissions)
     }
 
-    private func getSource() -> EKSource? {
-        // Ordered by how likely the source is to accept a *new calendar*, not
-        // by how convenient it is to reach.
-        //
-        // The default calendar's source used to come second, which is wrong:
-        // when the user's default calendar belongs to an Exchange or Google
-        // account, saveCalendar throws "That account does not allow calendars
-        // to be added or removed" -- and iCloud, which would have worked, was
-        // never tried. A local store always allows it and iCloud normally
-        // does, so both are preferred; the default is kept as a last resort so
-        // nothing that used to work stops working.
-        if let local = eventStore.sources.first(where: { $0.sourceType == .local }) {
-            return local
+    /// Every account that might accept a new calendar, most likely first.
+    ///
+    /// Deliberately returns candidates rather than one guess. Which account
+    /// will take a calendar cannot be known in advance -- `saveCalendar` is
+    /// the only authority, and it throws "That account does not allow
+    /// calendars to be added or removed" for the ones that refuse. Picking a
+    /// single source up front means one refusal ends the attempt even when
+    /// another account on the same device would have said yes, which is the
+    /// bug this replaces.
+    private func candidateSources() -> [EKSource] {
+        // `eventStore` is built when the plugin registers, which is before the
+        // user has granted access, and such a store can hold an empty source
+        // list. Refreshing is what makes the accounts visible.
+        eventStore.refreshSourcesIfNecessary()
+
+        var ordered: [EKSource] = []
+        func add(_ source: EKSource?) {
+            guard let source = source else { return }
+            guard !ordered.contains(where: { $0.sourceIdentifier == source.sourceIdentifier })
+            else { return }
+            ordered.append(source)
         }
 
-        if let iCloud = eventStore.sources.first(where: {
-            $0.sourceType == .calDAV && $0.sourceIdentifier == "iCloud"
-        }) {
-            return iCloud
+        // A local store always allows it -- when the device still has one.
+        // Turning on iCloud calendars removes it, which is why this cannot be
+        // the only candidate.
+        add(eventStore.sources.first(where: { $0.sourceType == .local }))
+
+        // iCloud is identified by *title*. `sourceIdentifier` is a UUID, so
+        // matching it against "iCloud" -- the obvious thing to reach for --
+        // never fires.
+        add(eventStore.sources.first(where: {
+            $0.sourceType == .calDAV && $0.title.lowercased() == "icloud"
+        }))
+
+        // Any remaining account that demonstrably holds a writable calendar.
+        // Subscribed and birthday sources hold none, so this excludes them.
+        for source in eventStore.sources
+        where source.sourceType == .calDAV || source.sourceType == .exchange {
+            if source.calendars(for: .event).contains(where: { $0.allowsContentModifications }) {
+                add(source)
+            }
         }
 
-        // Any other CalDAV account that demonstrably holds a writable
-        // calendar. Subscribed and birthday sources are read-only and are
-        // filtered out by this.
-        if let writable = eventStore.sources.first(where: { source in
-            source.sourceType == .calDAV &&
-            source.calendars(for: .event).contains { $0.allowsContentModifications }
-        }) {
-            return writable
-        }
+        // Last, so that nothing which used to work stops working.
+        add(eventStore.defaultCalendarForNewEvents?.source)
 
-        return eventStore.defaultCalendarForNewEvents?.source
+        return ordered
     }
 
-    private func createCalendar(_ call: FlutterMethodCall, _ result: FlutterResult) {
-        let arguments = call.arguments as! Dictionary<String, AnyObject>
-        let calendar = EKCalendar.init(for: EKEntityType.event, eventStore: eventStore)
-        do {
-            calendar.title = arguments[calendarNameArgument] as! String
+    private func createCalendar(_ call: FlutterMethodCall, _ result: @escaping FlutterResult) {
+        // Every other method gates on permission; this one never did. Without
+        // it a denied user gets "no account accepted a calendar", which sends
+        // them looking in entirely the wrong place.
+        checkPermissionsThenExecute(permissionsGrantedAction: {
+            let arguments = call.arguments as! Dictionary<String, AnyObject>
+            let title = arguments[calendarNameArgument] as! String
             let calendarColor = arguments[calendarColorArgument] as? String
 
-            if (calendarColor != nil) {
-                calendar.cgColor = UIColor(hex: calendarColor!)?.cgColor
-            }
-            else {
-                calendar.cgColor = UIColor(red: 255, green: 0, blue: 0, alpha: 0).cgColor // Red colour as a default
-            }
-
-            guard let source = getSource() else {
-              result(FlutterError(code: self.genericError, message: "Local calendar was not found.", details: nil))
-              return
+            let sources = candidateSources()
+            if sources.isEmpty {
+                result(FlutterError(
+                    code: self.genericError,
+                    message: "This device has no calendar account that can hold a new calendar.",
+                    details: nil))
+                return
             }
 
+            // Try each in turn. A refusal is per-account and a failed save
+            // commits nothing, so the next candidate starts from a clean
+            // store. Both the calendar and the store are rebuilt per attempt:
+            // an EKCalendar that failed to save cannot be reassigned to
+            // another source and saved again.
+            var failures: [String] = []
+            for source in sources {
+                let calendar = EKCalendar(for: .event, eventStore: self.eventStore)
+                calendar.title = title
+                calendar.cgColor = calendarColor.flatMap { UIColor(hex: $0)?.cgColor }
+                    ?? UIColor.red.cgColor
                 calendar.source = source
 
-            try eventStore.saveCalendar(calendar, commit: true)
-            result(calendar.calendarIdentifier)
-        }
-        catch {
-            eventStore.reset()
-            result(FlutterError(code: self.genericError, message: error.localizedDescription, details: nil))
-        }
+                do {
+                    try self.eventStore.saveCalendar(calendar, commit: true)
+                    result(calendar.calendarIdentifier)
+                    return
+                } catch {
+                    failures.append("\(source.title) — \(error.localizedDescription)")
+                    self.eventStore.reset()
+                }
+            }
+
+            // Naming what was tried turns the next bug report into something
+            // actionable instead of "it didn't work".
+            result(FlutterError(
+                code: self.genericError,
+                message: "No calendar account would accept a new calendar. Tried "
+                    + failures.joined(separator: "; "),
+                details: nil))
+        }, result: result)
     }
 
     private func updateCalendarColor(_ call: FlutterMethodCall, _ result: FlutterResult) {
