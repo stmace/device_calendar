@@ -999,7 +999,27 @@ public class SwiftDeviceCalendarPlugin: NSObject, FlutterPlugin, EKEventViewDele
             }
 
             if (startDateNumber == nil && endDateNumber == nil && followingInstances == nil) {
-                let ekEvent = self.eventStore.event(withIdentifier: eventId)
+                // Resolve by the SAME identifier the plugin hands out.
+                //
+                // createOrUpdateEvent and retrieveEvents both return
+                // `calendarItemExternalIdentifier`, and the date-range branch below
+                // matches on it -- but this branch used `event(withIdentifier:)`,
+                // which takes an `eventIdentifier`. Those are different strings, so
+                // the lookup always failed and every delete through this path
+                // reported "event not found" and silently deleted nothing.
+                //
+                // `calendarItemExternalIdentifier` is not unique across calendars --
+                // copying an event to another calendar carries it over -- so prefer
+                // the match in the calendar the caller named. The
+                // `event(withIdentifier:)` fallback keeps working for any caller
+                // that stored the other kind of identifier.
+                let externalMatches = self.eventStore
+                    .calendarItems(withExternalIdentifier: eventId)
+                    .compactMap { $0 as? EKEvent }
+                let ekEvent = externalMatches.first(where: { $0.calendar?.calendarIdentifier == calendarId })
+                    ?? externalMatches.first
+                    ?? self.eventStore.event(withIdentifier: eventId)
+
                 if ekEvent == nil {
                     self.finishWithEventNotFoundError(result: result, eventId: eventId)
                     return
