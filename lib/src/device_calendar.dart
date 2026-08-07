@@ -442,8 +442,18 @@ class DeviceCalendarPlugin {
       if (e is ArgumentError) {
         debugPrint(
             "INVOKE_CHANNEL_METHOD_ERROR! Name: ${e.name}, InvalidValue: ${e.invalidValue}, Message: ${e.message}, ${e.toString()}");
+        result.errors.add(
+          ResultError(ErrorCodes.invalidArguments, e.message.toString()),
+        );
       } else if (e is PlatformException) {
+        // Record it, don't just print it. This branch used to only debugPrint,
+        // which meant every native failure came back as a Result with no data
+        // *and* no errors -- so callers could tell that something went wrong
+        // but never what. The native sides do supply a reason (iOS returns
+        // FlutterError messages such as "Local calendar was not found."), and
+        // it was being discarded here, one line short of the caller.
         debugPrint('INVOKE_CHANNEL_METHOD_ERROR: $e\n$s');
+        _parsePlatformExceptionAndUpdateResult<T>(e, result);
       } else {
         _parsePlatformExceptionAndUpdateResult<T>(e as Exception?, result);
       }

@@ -245,4 +245,38 @@ void main() {
     expect(newEvent.color, equals(event.color));
     expect(newEvent.colorKey, equals(event.colorKey));
   });
+  // A native failure must arrive with its reason attached. This used to be
+  // debugPrint-ed and dropped, so callers received a Result with no data and
+  // no errors -- unable to tell the user anything beyond "it didn't work".
+  test('PlatformException_Is_Reported_As_An_Error', () async {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (MethodCall methodCall) async {
+      throw PlatformException(
+        code: ErrorCodes.generic.toString(),
+        message: 'That account does not allow calendars to be added or removed',
+      );
+    });
+
+    final result = await deviceCalendarPlugin.createCalendar('TaskIt');
+
+    expect(result.isSuccess, false);
+    expect(result.hasErrors, true);
+    expect(result.errors.first.errorMessage,
+        contains('does not allow calendars'));
+  });
+
+  test('PlatformException_Reason_Survives_For_Every_Method', () async {
+    // Not just createCalendar: the same catch serves retrieveCalendars,
+    // createOrUpdateEvent and deleteEvent, and all of them were silent.
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (MethodCall methodCall) async {
+      throw PlatformException(code: 'x', message: 'Calendar access denied');
+    });
+
+    final result = await deviceCalendarPlugin.retrieveCalendars();
+
+    expect(result.hasErrors, true);
+    expect(result.errors.first.errorMessage, contains('access denied'));
+  });
+
 }

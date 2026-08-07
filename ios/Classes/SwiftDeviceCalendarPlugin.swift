@@ -199,24 +199,38 @@ public class SwiftDeviceCalendarPlugin: NSObject, FlutterPlugin, EKEventViewDele
     }
 
     private func getSource() -> EKSource? {
-      let localSources = eventStore.sources.filter { $0.sourceType == .local }
-
-            if (!localSources.isEmpty) {
-                return localSources.first
-            }
-
-            if let defaultSource = eventStore.defaultCalendarForNewEvents?.source {
-                return defaultSource
-            }
-
-            let iCloudSources = eventStore.sources.filter { $0.sourceType == .calDAV && $0.sourceIdentifier == "iCloud" }
-
-            if (!iCloudSources.isEmpty) {
-                return iCloudSources.first
-            }
-
-            return nil
+        // Ordered by how likely the source is to accept a *new calendar*, not
+        // by how convenient it is to reach.
+        //
+        // The default calendar's source used to come second, which is wrong:
+        // when the user's default calendar belongs to an Exchange or Google
+        // account, saveCalendar throws "That account does not allow calendars
+        // to be added or removed" -- and iCloud, which would have worked, was
+        // never tried. A local store always allows it and iCloud normally
+        // does, so both are preferred; the default is kept as a last resort so
+        // nothing that used to work stops working.
+        if let local = eventStore.sources.first(where: { $0.sourceType == .local }) {
+            return local
         }
+
+        if let iCloud = eventStore.sources.first(where: {
+            $0.sourceType == .calDAV && $0.sourceIdentifier == "iCloud"
+        }) {
+            return iCloud
+        }
+
+        // Any other CalDAV account that demonstrably holds a writable
+        // calendar. Subscribed and birthday sources are read-only and are
+        // filtered out by this.
+        if let writable = eventStore.sources.first(where: { source in
+            source.sourceType == .calDAV &&
+            source.calendars(for: .event).contains { $0.allowsContentModifications }
+        }) {
+            return writable
+        }
+
+        return eventStore.defaultCalendarForNewEvents?.source
+    }
 
     private func createCalendar(_ call: FlutterMethodCall, _ result: FlutterResult) {
         let arguments = call.arguments as! Dictionary<String, AnyObject>
