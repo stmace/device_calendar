@@ -887,6 +887,69 @@ public class SwiftDeviceCalendarPlugin: NSObject, FlutterPlugin, EKEventViewDele
         }
     }
 
+    /// Resolves an event from the identifier this plugin hands out.
+    ///
+    /// `createOrUpdateEvent` and `retrieveEvents` both return
+    /// `calendarItemExternalIdentifier`, so that is what every caller stores and
+    /// passes back. `event(withIdentifier:)` takes an `EKEvent.eventIdentifier`
+    /// instead -- a different string -- so resolving with it always returns nil
+    /// and the operation reports "event not found" while doing nothing.
+    ///
+    /// An external identifier is not unique across calendars (copying an event
+    /// to another calendar carries it over), so prefer the match in the calendar
+    /// the caller named. `event(withIdentifier:)` stays as a fallback for any
+    /// caller holding the other kind of identifier.
+    ///
+    /// Shared rather than repeated: this bug has now been fixed twice, once per
+    /// copy of the same three lines.
+    ///
+    /// **`calendarItems(withExternalIdentifier:)` is not enough on its own.** On
+    /// a device writing to a *local* calendar it returns nothing for an event
+    /// `retrieveEvents` had returned moments earlier in the same pass — external
+    /// identifiers are a CalDAV/server concept, and locally-created events are
+    /// not reliably indexed by them. So the last resort is what `deleteEvent`'s
+    /// date-range branch has always done, and the reason that branch worked
+    /// while this one did not: scan a predicate and match in memory.
+    private func resolveEvent(eventId: String, calendarId: String?) -> EKEvent? {
+        let externalMatches = self.eventStore
+            .calendarItems(withExternalIdentifier: eventId)
+            .compactMap { $0 as? EKEvent }
+
+        if let match = externalMatches.first(where: { $0.calendar?.calendarIdentifier == calendarId })
+            ?? externalMatches.first {
+            return match
+        }
+
+        // For a caller that stored the other kind of identifier.
+        if let byIdentifier = self.eventStore.event(withIdentifier: eventId) {
+            return byIdentifier
+        }
+
+        return self.scanForEvent(eventId: eventId, calendarId: calendarId)
+    }
+
+    /// Finds an event by scanning, for the calendars the identifier lookups
+    /// cannot see into.
+    ///
+    /// A predicate needs a bounded range, so this cannot be exhaustive. The
+    /// window is deliberately wider than any caller's own — an event is most
+    /// worth finding precisely when it has drifted out of the range its caller
+    /// was looking at — and stays under the four years beyond which EventKit
+    /// stops honouring the range.
+    private func scanForEvent(eventId: String, calendarId: String?) -> EKEvent? {
+        let calendars = calendarId
+            .flatMap { self.eventStore.calendar(withIdentifier: $0) }
+            .map { [$0] }
+
+        let start = Date(timeIntervalSinceNow: -400 * 24 * 60 * 60)
+        let end = Date(timeIntervalSinceNow: 800 * 24 * 60 * 60)
+        let predicate = self.eventStore.predicateForEvents(withStart: start, end: end, calendars: calendars)
+
+        return self.eventStore.events(matching: predicate).first(where: {
+            $0.calendarItemExternalIdentifier == eventId || $0.eventIdentifier == eventId
+        })
+    }
+
     private func createOrUpdateEvent(_ call: FlutterMethodCall, _ result: @escaping FlutterResult) {
         checkPermissionsThenExecute(permissionsGrantedAction: {
             let arguments = call.arguments as! Dictionary<String, AnyObject>
@@ -917,7 +980,7 @@ public class SwiftDeviceCalendarPlugin: NSObject, FlutterPlugin, EKEventViewDele
             if eventId == nil {
                 ekEvent = EKEvent.init(eventStore: self.eventStore)
             } else {
-                ekEvent = self.eventStore.event(withIdentifier: eventId!)
+                ekEvent = self.resolveEvent(eventId: eventId!, calendarId: calendarId)
                 if(ekEvent == nil) {
                     self.finishWithEventNotFoundError(result: result, eventId: eventId!)
                     return
@@ -999,26 +1062,9 @@ public class SwiftDeviceCalendarPlugin: NSObject, FlutterPlugin, EKEventViewDele
             }
 
             if (startDateNumber == nil && endDateNumber == nil && followingInstances == nil) {
-                // Resolve by the SAME identifier the plugin hands out.
-                //
-                // createOrUpdateEvent and retrieveEvents both return
-                // `calendarItemExternalIdentifier`, and the date-range branch below
-                // matches on it -- but this branch used `event(withIdentifier:)`,
-                // which takes an `eventIdentifier`. Those are different strings, so
-                // the lookup always failed and every delete through this path
-                // reported "event not found" and silently deleted nothing.
-                //
-                // `calendarItemExternalIdentifier` is not unique across calendars --
-                // copying an event to another calendar carries it over -- so prefer
-                // the match in the calendar the caller named. The
-                // `event(withIdentifier:)` fallback keeps working for any caller
-                // that stored the other kind of identifier.
-                let externalMatches = self.eventStore
-                    .calendarItems(withExternalIdentifier: eventId)
-                    .compactMap { $0 as? EKEvent }
-                let ekEvent = externalMatches.first(where: { $0.calendar?.calendarIdentifier == calendarId })
-                    ?? externalMatches.first
-                    ?? self.eventStore.event(withIdentifier: eventId)
+                // Resolve by the SAME identifier the plugin hands out; see
+                // resolveEvent. The date-range branch below matches on it too.
+                let ekEvent = self.resolveEvent(eventId: eventId, calendarId: calendarId)
 
                 if ekEvent == nil {
                     self.finishWithEventNotFoundError(result: result, eventId: eventId)
