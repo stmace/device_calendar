@@ -462,7 +462,14 @@ public class SwiftDeviceCalendarPlugin: NSObject, FlutterPlugin, EKEventViewDele
             }
 
             for eventId in eventIds {
-                let ekEvent = self.eventStore.event(withIdentifier: eventId)
+                // The id-only branch: no date range was given, so there is no
+                // predicate scan above to fall back on and this lookup is the
+                // whole answer. It was the raw event(withIdentifier:), which
+                // resolveEvent's doc comment describes as always returning nil
+                // for the identifiers this plugin hands out -- so an eventIds
+                // query returned an empty list for events that plainly exist,
+                // and a caller reading one event back by id got nothing.
+                let ekEvent = self.resolveEvent(eventId: eventId, calendarId: calendarId)
                 if ekEvent == nil {
                     continue
                 }
