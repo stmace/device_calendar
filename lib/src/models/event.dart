@@ -170,11 +170,27 @@ class Event {
       // Getting and setting an organiser for iOS
       var organiser = Attendee.fromJson(json['organizer']);
 
+      // Match on the address alone. Requiring the display name to match too
+      // dropped the flag whenever the two sides spelled the name differently,
+      // which a directory entry and an invitation's CN routinely do.
       var attendee = attendees?.firstWhereOrNull((at) =>
-          at?.name == organiser.name &&
+          at?.emailAddress != null &&
           at?.emailAddress == organiser.emailAddress);
       if (attendee != null) {
         attendee.isOrganiser = true;
+      } else {
+        // The organizer is not always one of the attendees. Exchange lists
+        // ORGANIZER *outside* the ATTENDEE list, so for the commonest kind of
+        // invitation there was nothing to flag and the organizer was silently
+        // discarded right here -- leaving every Dart caller unable to tell an
+        // invitation from an ordinary shared appointment. Keep them instead.
+        organiser.isOrganiser = true;
+        final existing = attendees;
+        if (existing == null) {
+          attendees = <Attendee?>[organiser];
+        } else {
+          existing.add(organiser);
+        }
       }
     }
 

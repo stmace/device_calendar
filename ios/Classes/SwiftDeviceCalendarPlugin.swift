@@ -1114,7 +1114,15 @@ public class SwiftDeviceCalendarPlugin: NSObject, FlutterPlugin, EKEventViewDele
             checkPermissionsThenExecute(permissionsGrantedAction: {
                 let arguments = call.arguments as! Dictionary<String, AnyObject>
                 let eventId = arguments[eventIdArgument] as! String
-                let event = self.eventStore.event(withIdentifier: eventId)
+                // Was `eventStore.event(withIdentifier:)`, which resolveEvent's
+                // own doc comment describes as always returning nil for the
+                // identifiers this plugin hands out -- and it did: presenting
+                // the sheet for a real pending invitation failed with "The
+                // event with the ID %@ could not be found". Same bug as the two
+                // resolveEvent was written to end; this path was missed because
+                // nothing called it. calendarId is not on the channel for this
+                // method, so the scan falls back to every calendar.
+                let event = self.resolveEvent(eventId: eventId, calendarId: nil)
 
                 if event != nil {
                     let eventController = EKEventViewController()
