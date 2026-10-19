@@ -245,6 +245,40 @@ void main() {
     expect(newEvent.color, equals(event.color));
     expect(newEvent.colorKey, equals(event.colorKey));
   });
+  // The iOS side reports a series' end (RRULE UNTIL) as a UTC instant with a
+  // `Z` suffix. It used to send a floating time rendered in the phone's current
+  // zone, so the same series read back differently in every zone the phone
+  // visited. Both shapes must still parse, and the Z form must come back as
+  // that exact UTC instant.
+  test('RecurrenceRule_Until_Parses_Utc_And_Floating', () async {
+    Map<String, dynamic> nativeRule(String until) =>
+        {'freq': 'WEEKLY', 'interval': 1, 'until': until, 'byday': <String>[]};
+
+    final utc = Event.fromJson({
+      'calendarId': 'calendarId',
+      'eventId': 'eventId',
+      'eventStartDate': 0,
+      'eventEndDate': 3600000,
+      'recurrenceRule': nativeRule('2027-05-24T19:30:00Z'),
+    });
+    expect(utc.recurrenceRule?.until, DateTime.utc(2027, 5, 24, 19, 30));
+    //The string the app keys on reads the same in every zone.
+    expect(utc.recurrenceRule.toString(), contains('UNTIL=20270524T193000'));
+
+    final floating = Event.fromJson({
+      'calendarId': 'calendarId',
+      'eventId': 'eventId',
+      'eventStartDate': 0,
+      'eventEndDate': 3600000,
+      'recurrenceRule': nativeRule('2027-05-24T12:30:00'),
+    });
+    expect(floating.recurrenceRule?.until, DateTime.utc(2027, 5, 24, 12, 30));
+
+    //What goes back to native on create/update: the same instant, which the
+    //native side reads as UTC with or without the suffix.
+    expect(utc.toJson()['recurrenceRule']['until'], '2027-05-24T19:30:00');
+  });
+
   // A native failure must arrive with its reason attached. This used to be
   // debugPrint-ed and dropped, so callers received a Result with no data and
   // no errors -- unable to tell the user anything beyond "it didn't work".

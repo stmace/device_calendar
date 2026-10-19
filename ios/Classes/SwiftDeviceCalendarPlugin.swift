@@ -598,7 +598,7 @@ public class SwiftDeviceCalendarPlugin: NSObject, FlutterPlugin, EKEventViewDele
 
             let endDateRaw = ekRecurrenceRule.recurrenceEnd?.endDate
             if(endDateRaw != nil) {
-                endDate = formateDateTime(dateTime: endDateRaw!)
+                endDate = formatUntilUtc(dateTime: endDateRaw!)
             }
 
             let byWeekDays = ekRecurrenceRule.daysOfTheWeek
@@ -649,9 +649,22 @@ public class SwiftDeviceCalendarPlugin: NSObject, FlutterPlugin, EKEventViewDele
         }
     }
 
-    private func formateDateTime(dateTime: Date) -> String {
-        var calendar = Calendar.current
-        calendar.timeZone = TimeZone.current
+    /// Renders a recurrence end (RRULE `UNTIL`) as a UTC instant with a `Z`
+    /// suffix, per RFC 5545 §3.3.10: UNTIL must be UTC when DTSTART carries a
+    /// time zone, and `EKRecurrenceEnd.endDate` is an absolute `Date` anyway.
+    ///
+    /// This used to render in `TimeZone.current` with no suffix, a floating
+    /// local time. The same series then read back with a different UNTIL in
+    /// every zone the phone visited, so anything keyed on the rule string
+    /// (TaskIt's legacy recurring-occurrence IDs) changed whenever the phone
+    /// travelled. A UTC rendering reads the same everywhere.
+    ///
+    /// Formatted from Gregorian components with a fixed locale, so neither the
+    /// user's calendar system nor their 12/24-hour setting can leak in.
+    private func formatUntilUtc(dateTime: Date) -> String {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.locale = Locale(identifier: "en_US_POSIX")
+        calendar.timeZone = TimeZone(identifier: "UTC")!
 
         func twoDigits(_ n: Int) -> String {
             if (n < 10) {return "0\(n)"} else {return "\(n)"}
@@ -666,24 +679,40 @@ public class SwiftDeviceCalendarPlugin: NSObject, FlutterPlugin, EKEventViewDele
             return "\(sign)000\(absolute)"
         }
 
-        let year = calendar.component(.year, from: dateTime)
-        let month = calendar.component(.month, from: dateTime)
-        let day = calendar.component(.day, from: dateTime)
-        let hour = calendar.component(.hour, from: dateTime)
-        let minutes = calendar.component(.minute, from: dateTime)
-        let seconds = calendar.component(.second, from: dateTime)
+        let components = calendar.dateComponents(
+            [.year, .month, .day, .hour, .minute, .second], from: dateTime)
+        let year = components.year ?? 0
 
         assert(year >= 0 && year <= 9999)
 
         let yearString = fourDigits(year)
-        let monthString = twoDigits(month)
-        let dayString = twoDigits(day)
-        let hourString = twoDigits(hour)
-        let minuteString = twoDigits(minutes)
-        let secondString = twoDigits(seconds)
-        let utcSuffix = calendar.timeZone == TimeZone(identifier: "UTC") ? "Z" : ""
-        return "\(yearString)-\(monthString)-\(dayString)T\(hourString):\(minuteString):\(secondString)\(utcSuffix)"
+        let monthString = twoDigits(components.month ?? 1)
+        let dayString = twoDigits(components.day ?? 1)
+        let hourString = twoDigits(components.hour ?? 0)
+        let minuteString = twoDigits(components.minute ?? 0)
+        let secondString = twoDigits(components.second ?? 0)
+        return "\(yearString)-\(monthString)-\(dayString)T\(hourString):\(minuteString):\(secondString)Z"
+    }
 
+    /// Parses an `until` argument from Dart into the instant it names.
+    ///
+    /// Accepts both `yyyy-MM-ddTHH:mm:ssZ` and the same without the `Z`, and
+    /// reads either as UTC. The Dart side's `rrule` JSON encoder never writes
+    /// the suffix, but its `until` is always a UTC `DateTime`, and since
+    /// [formatUntilUtc] that value is the true UTC instant, so the round trip
+    /// is exact. A suffix-less value from an older build was always read as
+    /// UTC here too, so nothing that parsed before parses differently now.
+    private func parseUntilUtc(_ value: String) -> Date? {
+        var trimmed = value
+        if trimmed.hasSuffix("Z") || trimmed.hasSuffix("z") {
+            trimmed.removeLast()
+        }
+        let dateFormatter = DateFormatter()
+        dateFormatter.calendar = Calendar(identifier: .gregorian)
+        dateFormatter.locale = Locale(identifier: "en_US_POSIX")
+        dateFormatter.timeZone = TimeZone(identifier: "UTC")
+        dateFormatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"
+        return dateFormatter.date(from: trimmed)
     }
 
     private func createEKRecurrenceRules(_ arguments: [String : AnyObject]) -> [EKRecurrenceRule]?{
@@ -699,7 +728,7 @@ public class SwiftDeviceCalendarPlugin: NSObject, FlutterPlugin, EKEventViewDele
         let totalOccurrences = recurrenceRuleArguments![countArgument] as? NSInteger
         let interval = recurrenceRuleArguments![intervalArgument] as? NSInteger
         var recurrenceInterval = 1
-        var endDate = recurrenceRuleArguments![untilArgument] as? String
+        let endDate = recurrenceRuleArguments![untilArgument] as? String
         var namedFrequency: EKRecurrenceFrequency
         switch recurrenceFrequency {
         case "YEARLY":
@@ -716,14 +745,7 @@ public class SwiftDeviceCalendarPlugin: NSObject, FlutterPlugin, EKEventViewDele
 
         var recurrenceEnd: EKRecurrenceEnd?
         if endDate != nil {
-            let dateFormatter = DateFormatter()
-            dateFormatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ssZ"
-
-            if (!endDate!.hasSuffix("Z")){
-                endDate!.append("Z")
-            }
-
-            let dateTime = dateFormatter.date(from: endDate!)
+            let dateTime = parseUntilUtc(endDate!)
             if dateTime != nil {
                 recurrenceEnd = EKRecurrenceEnd(end: dateTime!)
             }
